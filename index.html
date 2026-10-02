@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>FIBiLS phone sensor node</title>
+<script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+<style>
+  :root { box-sizing: border-box; padding-top: env(safe-area-inset-top, 0px);
+          padding-bottom: env(safe-area-inset-bottom, 0px);
+          --bg:#101317; --fg:#e8eaed; --dim:#8b94a0; --ok:#3ddc84; --bad:#ff5252; --card:#1b2028; }
+  *,*::before,*::after { box-sizing: inherit; }
+  body { margin:0; padding:16px; background:var(--bg); color:var(--fg);
+         font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  h1 { font-size:18px; margin:0 0 4px; }
+  .sub { color:var(--dim); font-size:13px; margin-bottom:16px; }
+  .card { background:var(--card); border-radius:10px; padding:14px; margin-bottom:12px; }
+  label { display:block; font-size:12px; color:var(--dim); margin-bottom:4px; }
+  input { width:100%; padding:10px; font-size:15px; border-radius:6px; border:1px solid #2c333d;
+          background:#0c0f13; color:var(--fg); }
+  button { width:100%; padding:16px; font-size:17px; font-weight:600; border:0; border-radius:10px;
+           background:var(--ok); color:#06210f; margin-top:12px; }
+  button.stop { background:var(--bad); color:#2a0000; }
+  .row { display:flex; justify-content:space-between; font-size:14px; padding:3px 0;
+         font-variant-numeric:tabular-nums; }
+  .row span:first-child { color:var(--dim); }
+  #alert { font-size:26px; font-weight:700; text-align:center; padding:18px 0; }
+  .ok { color:var(--ok); } .bad { color:var(--bad); }
+  .note { font-size:12px; color:var(--dim); line-height:1.5; }
+</style>
+</head>
+<body>
+
+<h1>FIBiLS phone sensor node</h1>
+<div class="sub">Streams phone IMU to the ESP32 over MQTT</div>
+
+<div class="card">
+  <label>Topic prefix (must match the sketch)</label>
+  <input id="prefix" value="fibils/nahin">
+  <button id="go">Start streaming</button>
+</div>
+
+<div class="card">
+  <div class="row"><span>Broker</span><span id="st">not connected</span></div>
+  <div class="row"><span>Batches sent</span><span id="sent">0</span></div>
+  <div class="row"><span>Rate</span><span id="rate">0 Hz</span></div>
+</div>
+
+<div class="card">
+  <div class="row"><span>ax ay az (g)</span><span id="acc">-</span></div>
+  <div class="row"><span>gx gy gz (deg/s)</span><span id="gyr">-</span></div>
+</div>
+
+<div class="card">
+  <div id="alert" class="ok">waiting</div>
+  <div class="row"><span>probability</span><span id="p">-</span></div>
+  <div class="row"><span>inference</span><span id="ms">-</span></div>
+</div>
+
+<div class="card note">
+  Put the phone in a trouser pocket or hold it at the waist, the way SisFall was recorded.
+  Sit down hard on a bed or drop the phone onto a cushion to trigger a fall pattern.
+  Do not drop it on a hard floor.
+</div>
+
+<script>
+const HZ = 50, PERIOD = 1000 / HZ, BATCH = 25;   // 0.5 s per message
+let client = null, running = false, timer = null;
+let latest = [0,0,1,0,0,0], batch = [], sent = 0, ticks = 0;
+
+const $ = id => document.getElementById(id);
+
+function onMotion(e) {
+  const a = e.accelerationIncludingGravity || {};
+  const r = e.rotationRate || {};
+  latest = [
+    (a.x || 0) / 9.81, (a.y || 0) / 9.81, (a.z || 0) / 9.81,
+    r.alpha || 0, r.beta || 0, r.gamma || 0
+  ];
+}
+
+function tick() {
+  batch.push(latest.map(v => v.toFixed(3)).join(","));
+  ticks++;
+  $("acc").textContent = latest.slice(0,3).map(v => v.toFixed(2)).join("  ");
+  $("gyr").textContent = latest.slice(3).map(v => v.toFixed(0)).join("  ");
+  if (batch.length >= BATCH) {
+    if (client && client.connected) {
+      client.publish($("prefix").value + "/imu", batch.join(";"));
+      $("sent").textContent = ++sent;
+    }
+    batch = [];
+  }
+}
+
+setInterval(() => { $("rate").textContent = ticks + " Hz"; ticks = 0; }, 1000);
+
+async function start() {
+  // iOS needs explicit permission, requested from a user gesture
+  if (typeof DeviceMotionEvent !== "undefined" &&
+      typeof DeviceMotionEvent.requestPermission === "function") {
+    const res = await DeviceMotionEvent.requestPermission();
+    if (res !== "granted") { alert("Motion permission denied"); return; }
+  }
+  window.addEventListener("devicemotion", onMotion);
+
+  client = mqtt.connect("wss://broker.hivemq.com:8884/mqtt",
+                        { clientId: "phone-" + Math.random().toString(16).slice(2) });
+
+  client.on("connect", () => {
+    $("st").textContent = "connected";
+    client.subscribe($("prefix").value + "/alert");
+  });
+  client.on("error", () => { $("st").textContent = "error"; });
+  client.on("close",  () => { $("st").textContent = "closed"; });
+
+  client.on("message", (topic, msg) => {
+    try {
+      const d = JSON.parse(msg.toString());
+      const el = $("alert");
+      el.textContent = d.fall ? "FALL DETECTED" : "normal";
+      el.className = d.fall ? "bad" : "ok";
+      $("p").textContent  = Number(d.p).toFixed(3);
+      $("ms").textContent = Number(d.ms).toFixed(2) + " ms";
+      if (d.fall && navigator.vibrate) navigator.vibrate([200,100,200,100,200]);
+    } catch (err) { /* ignore malformed */ }
+  });
+
+  timer = setInterval(tick, PERIOD);
+  running = true;
+  $("go").textContent = "Stop";
+  $("go").className = "stop";
+}
+
+function stop() {
+  window.removeEventListener("devicemotion", onMotion);
+  clearInterval(timer);
+  if (client) client.end();
+  running = false;
+  $("st").textContent = "not connected";
+  $("go").textContent = "Start streaming";
+  $("go").className = "";
+}
+
+$("go").addEventListener("click", () => running ? stop() : start());
+</script>
+</body>
+</html>
