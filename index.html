@@ -9,7 +9,7 @@
   :root { box-sizing: border-box; padding-top: env(safe-area-inset-top, 0px);
           padding-bottom: env(safe-area-inset-bottom, 0px);
           --bg:#101317; --fg:#e8eaed; --dim:#8b94a0; --ok:#3ddc84; --bad:#ff5252;
-          --card:#1b2028; --line:#2c333d; }
+          --blue:#5aa2f0; --card:#1b2028; --line:#2c333d; }
   *,*::before,*::after { box-sizing: inherit; }
   body { margin:0; padding:16px; background:var(--bg); color:var(--fg);
          font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
@@ -31,15 +31,20 @@
   #alert { font-size:26px; font-weight:700; text-align:center; padding:18px 0; }
   .ok { color:var(--ok); } .bad { color:var(--bad); }
   .note { font-size:12px; color:var(--dim); line-height:1.5; }
-  .ev { border-top:1px solid var(--line); padding:10px 0; }
+  .ev { border-top:1px solid var(--line); padding:12px 0; }
   .ev:first-child { border-top:0; }
   .ev-top { display:flex; justify-content:space-between; align-items:baseline; }
   .ev-time { font-size:17px; font-weight:700; color:var(--bad);
              font-variant-numeric:tabular-nums; }
   .ev-date { font-size:12px; color:var(--dim); }
-  .ev-meta { font-size:12px; color:var(--dim); margin-top:3px;
+  .ev-meta { font-size:12px; color:var(--dim); margin-top:4px; line-height:1.6;
              font-variant-numeric:tabular-nums; }
   .btn-row { display:flex; gap:10px; }
+  .wave { width:100%; height:80px; display:block; margin-top:8px;
+          background:#0c0f13; border-radius:6px; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:8px 14px; margin-top:8px; }
+  .g-lab { font-size:11px; color:var(--dim); }
+  .g-val { font-size:19px; font-weight:700; font-variant-numeric:tabular-nums; }
 </style>
 </head>
 <body>
@@ -72,6 +77,11 @@
 </div>
 
 <div class="card">
+  <h2>Last detection, what the model saw</h2>
+  <div id="last"><p class="note">Nothing yet. The waveform appears when a fall is detected.</p></div>
+</div>
+
+<div class="card">
   <h2>Fall history</h2>
   <div id="log"><p class="note">No falls recorded.</p></div>
   <div class="btn-row">
@@ -88,8 +98,9 @@
 
 <script>
 const HZ = 50, PERIOD = 1000 / HZ, BATCH = 25;
-const COOLDOWN = 5000;          // one logged event per fall, not one per window
+const COOLDOWN = 5000;
 const STORE = "fibils-falls";
+const KEEP_WAVE = 20;          // keep waveforms for the most recent events only
 
 let client = null, running = false, timer = null;
 let latest = [0,0,1,0,0,0], batch = [], sent = 0, ticks = 0;
@@ -98,14 +109,62 @@ let events = [];
 
 const $ = id => document.getElementById(id);
 
+// ---------- waveform drawing ----------
+function waveSvg(w, tMin, tMax) {
+  if (!w || !w.length) return "";
+  const W = 320, H = 80, pad = 6;
+  let peak = 2;
+  for (let i = 0; i < w.length; i++) if (w[i] > peak) peak = w[i];
+  const x = i => pad + (i / (w.length - 1)) * (W - 2 * pad);
+  const y = v => H - pad - (v / peak) * (H - 2 * pad);
+
+  let pts = "";
+  for (let i = 0; i < w.length; i++) pts += x(i).toFixed(1) + "," + y(w[i]).toFixed(1) + " ";
+
+  const oneG = y(1).toFixed(1);
+  const iMin = Math.round(tMin * HZ), iMax = Math.round(tMax * HZ);
+
+  return '<svg class="wave" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" ' +
+         'aria-label="Acceleration magnitude across the two second window that triggered the alarm">' +
+         '<line x1="0" y1="' + oneG + '" x2="' + W + '" y2="' + oneG +
+         '" stroke="#2c333d" stroke-width="1" stroke-dasharray="4 4"/>' +
+         '<polyline points="' + pts.trim() + '" fill="none" stroke="#5aa2f0" stroke-width="1.6"/>' +
+         '<circle cx="' + x(iMin).toFixed(1) + '" cy="' + y(w[iMin] || 0).toFixed(1) +
+         '" r="3" fill="#3ddc84"/>' +
+         '<circle cx="' + x(iMax).toFixed(1) + '" cy="' + y(w[iMax] || 0).toFixed(1) +
+         '" r="3" fill="#ff5252"/>' +
+         '</svg>';
+}
+
+function detailHtml(e) {
+  const sep = (e.tMax - e.tMin).toFixed(2);
+  return waveSvg(e.w, e.tMin, e.tMax) +
+    '<div class="grid">' +
+    '<div><div class="g-lab">free fall, lowest</div><div class="g-val" style="color:#3ddc84">' +
+      e.minA.toFixed(2) + ' g</div></div>' +
+    '<div><div class="g-lab">impact, highest</div><div class="g-val" style="color:#ff5252">' +
+      e.maxA.toFixed(2) + ' g</div></div>' +
+    '<div><div class="g-lab">peak rotation</div><div class="g-val">' +
+      e.maxG.toFixed(0) + ' deg/s</div></div>' +
+    '<div><div class="g-lab">drop to impact</div><div class="g-val">' + sep + ' s</div></div>' +
+    '</div>' +
+    '<p class="note" style="margin-top:8px">Dashed line marks 1 g. Green is the free fall minimum, ' +
+    'red is the impact peak.</p>';
+}
+
 // ---------- event log ----------
 function load() {
   try { events = JSON.parse(localStorage.getItem(STORE) || "[]"); }
   catch (e) { events = []; }
 }
 function save() {
-  try { localStorage.setItem(STORE, JSON.stringify(events.slice(0, 200))); }
-  catch (e) { /* storage may be unavailable */ }
+  try {
+    const trimmed = events.slice(0, 200).map(function (e, i) {
+      if (i < KEEP_WAVE) return e;
+      const c = Object.assign({}, e); delete c.w; return c;
+    });
+    localStorage.setItem(STORE, JSON.stringify(trimmed));
+  } catch (e) { /* storage may be unavailable */ }
 }
 function render() {
   const el = $("log");
@@ -113,33 +172,42 @@ function render() {
   el.innerHTML = events.map(function (e) {
     const d = new Date(e.t);
     return '<div class="ev"><div class="ev-top">' +
-           '<span class="ev-time">' + d.toLocaleTimeString() + '</span>' +
-           '<span class="ev-date">' + d.toLocaleDateString() + '</span></div>' +
-           '<div class="ev-meta">probability ' + e.p.toFixed(3) +
-           '   inference ' + e.ms.toFixed(2) + ' ms' +
-           '   round trip ' + e.rt + ' ms</div></div>';
+      '<span class="ev-time">' + d.toLocaleTimeString() + '</span>' +
+      '<span class="ev-date">' + d.toLocaleDateString() + '</span></div>' +
+      '<div class="ev-meta">' +
+        'probability ' + e.p.toFixed(3) + '<br>' +
+        'lowest ' + e.minA.toFixed(2) + ' g at ' + e.tMin.toFixed(2) + ' s, ' +
+        'peak ' + e.maxA.toFixed(2) + ' g at ' + e.tMax.toFixed(2) + ' s<br>' +
+        'rotation ' + e.maxG.toFixed(0) + ' deg/s, inference ' + e.ms.toFixed(2) + ' ms, ' +
+        'round trip ' + e.rt + ' ms' +
+      '</div></div>';
   }).join("");
 }
-function logFall(p, ms, rt) {
+function logFall(e) {
   const now = Date.now();
-  if (now - lastLogged < COOLDOWN) return;   // same fall, a later overlapping window
+  if (now - lastLogged < COOLDOWN) return;
   lastLogged = now;
-  events.unshift({ t: now, p: p, ms: ms, rt: rt });
+  events.unshift(e);
   save(); render();
+  $("last").innerHTML = detailHtml(e);
 }
 
 $("clear").addEventListener("click", function () {
   if (!confirm("Delete all recorded falls?")) return;
   events = []; save(); render();
+  $("last").innerHTML = '<p class="note">Nothing yet. The waveform appears when a fall is detected.</p>';
 });
 
 $("csv").addEventListener("click", function () {
-  const rows = [["iso_time","local_time","probability","inference_ms","round_trip_ms"]]
-    .concat(events.map(function (e) {
-      const d = new Date(e.t);
-      return [d.toISOString(), d.toLocaleString().replace(/,/g, ""),
-              e.p.toFixed(4), e.ms.toFixed(3), e.rt];
-    }));
+  const head = ["iso_time","local_time","probability","inference_ms","round_trip_ms",
+                "min_g","t_min_s","max_g","t_max_s","peak_dps"];
+  const rows = [head].concat(events.map(function (e) {
+    const d = new Date(e.t);
+    return [d.toISOString(), d.toLocaleString().replace(/,/g, " "),
+            e.p.toFixed(4), e.ms.toFixed(3), e.rt,
+            e.minA.toFixed(2), e.tMin.toFixed(2),
+            e.maxA.toFixed(2), e.tMax.toFixed(2), e.maxG.toFixed(0)];
+  }));
   const blob = new Blob([rows.map(function (r) { return r.join(","); }).join("\n")],
                         { type: "text/csv" });
   const a = document.createElement("a");
@@ -204,8 +272,14 @@ async function start() {
       $("p").textContent  = Number(d.p).toFixed(3);
       $("ms").textContent = Number(d.ms).toFixed(2) + " ms";
       $("rt").textContent = rt + " ms";
+
       if (d.fall) {
-        logFall(Number(d.p), Number(d.ms), rt);
+        logFall({
+          t: Date.now(), p: Number(d.p), ms: Number(d.ms), rt: rt,
+          minA: Number(d.minA || 0), maxA: Number(d.maxA || 0),
+          tMin: Number(d.tMin || 0), tMax: Number(d.tMax || 0),
+          maxG: Number(d.maxG || 0), w: d.w || []
+        });
         if (navigator.vibrate) navigator.vibrate([200,100,200,100,200]);
       }
     } catch (err) { /* ignore malformed */ }
@@ -230,6 +304,7 @@ function stop() {
 $("go").addEventListener("click", function () { running ? stop() : start(); });
 
 load(); render();
+if (events.length && events[0].w) $("last").innerHTML = detailHtml(events[0]);
 </script>
 </body>
 </html>
