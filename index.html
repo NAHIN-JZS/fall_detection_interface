@@ -158,8 +158,20 @@ function detailHtml(e) {
 
 // ---------- event log ----------
 function load() {
-  try { events = JSON.parse(localStorage.getItem(STORE) || "[]"); }
-  catch (e) { events = []; }
+  let raw = [];
+  try { raw = JSON.parse(localStorage.getItem(STORE) || "[]"); }
+  catch (e) { raw = []; }
+  const num = function (v) { return (typeof v === "number" && isFinite(v)) ? v : 0; };
+  events = (Array.isArray(raw) ? raw : []).map(function (e) {
+    return {
+      t: num(e.t) || Date.now(),
+      p: num(e.p), ms: num(e.ms), rt: num(e.rt),
+      minA: num(e.minA), maxA: num(e.maxA),
+      tMin: num(e.tMin), tMax: num(e.tMax),
+      maxG: num(e.maxG),
+      w: Array.isArray(e.w) ? e.w : []
+    };
+  });
 }
 function save() {
   try {
@@ -298,7 +310,7 @@ async function start() {
         });
         if (navigator.vibrate) navigator.vibrate([200,100,200,100,200]);
       }
-    } catch (err) { /* ignore malformed */ }
+    } catch (err) { console.error("alert handler failed", err, msg.toString()); }
   });
 
   timer = setInterval(tick, PERIOD);
