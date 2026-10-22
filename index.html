@@ -8,25 +8,38 @@
 <style>
   :root { box-sizing: border-box; padding-top: env(safe-area-inset-top, 0px);
           padding-bottom: env(safe-area-inset-bottom, 0px);
-          --bg:#101317; --fg:#e8eaed; --dim:#8b94a0; --ok:#3ddc84; --bad:#ff5252; --card:#1b2028; }
+          --bg:#101317; --fg:#e8eaed; --dim:#8b94a0; --ok:#3ddc84; --bad:#ff5252;
+          --card:#1b2028; --line:#2c333d; }
   *,*::before,*::after { box-sizing: inherit; }
   body { margin:0; padding:16px; background:var(--bg); color:var(--fg);
          font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
   h1 { font-size:18px; margin:0 0 4px; }
+  h2 { font-size:13px; margin:0 0 10px; color:var(--dim); font-weight:600;
+       letter-spacing:.5px; text-transform:uppercase; }
   .sub { color:var(--dim); font-size:13px; margin-bottom:16px; }
   .card { background:var(--card); border-radius:10px; padding:14px; margin-bottom:12px; }
   label { display:block; font-size:12px; color:var(--dim); margin-bottom:4px; }
-  input { width:100%; padding:10px; font-size:15px; border-radius:6px; border:1px solid #2c333d;
-          background:#0c0f13; color:var(--fg); }
-  button { width:100%; padding:16px; font-size:17px; font-weight:600; border:0; border-radius:10px;
-           background:var(--ok); color:#06210f; margin-top:12px; }
+  input { width:100%; padding:10px; font-size:15px; border-radius:6px;
+          border:1px solid var(--line); background:#0c0f13; color:var(--fg); }
+  button { width:100%; padding:16px; font-size:17px; font-weight:600; border:0;
+           border-radius:10px; background:var(--ok); color:#06210f; margin-top:12px; }
   button.stop { background:var(--bad); color:#2a0000; }
+  button.small { padding:10px; font-size:14px; background:#2c333d; color:var(--fg); }
   .row { display:flex; justify-content:space-between; font-size:14px; padding:3px 0;
          font-variant-numeric:tabular-nums; }
   .row span:first-child { color:var(--dim); }
   #alert { font-size:26px; font-weight:700; text-align:center; padding:18px 0; }
   .ok { color:var(--ok); } .bad { color:var(--bad); }
   .note { font-size:12px; color:var(--dim); line-height:1.5; }
+  .ev { border-top:1px solid var(--line); padding:10px 0; }
+  .ev:first-child { border-top:0; }
+  .ev-top { display:flex; justify-content:space-between; align-items:baseline; }
+  .ev-time { font-size:17px; font-weight:700; color:var(--bad);
+             font-variant-numeric:tabular-nums; }
+  .ev-date { font-size:12px; color:var(--dim); }
+  .ev-meta { font-size:12px; color:var(--dim); margin-top:3px;
+             font-variant-numeric:tabular-nums; }
+  .btn-row { display:flex; gap:10px; }
 </style>
 </head>
 <body>
@@ -55,6 +68,16 @@
   <div id="alert" class="ok">waiting</div>
   <div class="row"><span>probability</span><span id="p">-</span></div>
   <div class="row"><span>inference</span><span id="ms">-</span></div>
+  <div class="row"><span>round trip</span><span id="rt">-</span></div>
+</div>
+
+<div class="card">
+  <h2>Fall history</h2>
+  <div id="log"><p class="note">No falls recorded.</p></div>
+  <div class="btn-row">
+    <button class="small" id="csv">Export CSV</button>
+    <button class="small" id="clear">Clear log</button>
+  </div>
 </div>
 
 <div class="card note">
@@ -64,12 +87,68 @@
 </div>
 
 <script>
-const HZ = 50, PERIOD = 1000 / HZ, BATCH = 25;   // 0.5 s per message
+const HZ = 50, PERIOD = 1000 / HZ, BATCH = 25;
+const COOLDOWN = 5000;          // one logged event per fall, not one per window
+const STORE = "fibils-falls";
+
 let client = null, running = false, timer = null;
 let latest = [0,0,1,0,0,0], batch = [], sent = 0, ticks = 0;
+let lastPublish = 0, lastLogged = 0;
+let events = [];
 
 const $ = id => document.getElementById(id);
 
+// ---------- event log ----------
+function load() {
+  try { events = JSON.parse(localStorage.getItem(STORE) || "[]"); }
+  catch (e) { events = []; }
+}
+function save() {
+  try { localStorage.setItem(STORE, JSON.stringify(events.slice(0, 200))); }
+  catch (e) { /* storage may be unavailable */ }
+}
+function render() {
+  const el = $("log");
+  if (!events.length) { el.innerHTML = '<p class="note">No falls recorded.</p>'; return; }
+  el.innerHTML = events.map(function (e) {
+    const d = new Date(e.t);
+    return '<div class="ev"><div class="ev-top">' +
+           '<span class="ev-time">' + d.toLocaleTimeString() + '</span>' +
+           '<span class="ev-date">' + d.toLocaleDateString() + '</span></div>' +
+           '<div class="ev-meta">probability ' + e.p.toFixed(3) +
+           '   inference ' + e.ms.toFixed(2) + ' ms' +
+           '   round trip ' + e.rt + ' ms</div></div>';
+  }).join("");
+}
+function logFall(p, ms, rt) {
+  const now = Date.now();
+  if (now - lastLogged < COOLDOWN) return;   // same fall, a later overlapping window
+  lastLogged = now;
+  events.unshift({ t: now, p: p, ms: ms, rt: rt });
+  save(); render();
+}
+
+$("clear").addEventListener("click", function () {
+  if (!confirm("Delete all recorded falls?")) return;
+  events = []; save(); render();
+});
+
+$("csv").addEventListener("click", function () {
+  const rows = [["iso_time","local_time","probability","inference_ms","round_trip_ms"]]
+    .concat(events.map(function (e) {
+      const d = new Date(e.t);
+      return [d.toISOString(), d.toLocaleString().replace(/,/g, ""),
+              e.p.toFixed(4), e.ms.toFixed(3), e.rt];
+    }));
+  const blob = new Blob([rows.map(function (r) { return r.join(","); }).join("\n")],
+                        { type: "text/csv" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "fall_events.csv";
+  a.click();
+});
+
+// ---------- sensors ----------
 function onMotion(e) {
   const a = e.accelerationIncludingGravity || {};
   const r = e.rotationRate || {};
@@ -80,12 +159,13 @@ function onMotion(e) {
 }
 
 function tick() {
-  batch.push(latest.map(v => v.toFixed(3)).join(","));
+  batch.push(latest.map(function (v) { return v.toFixed(3); }).join(","));
   ticks++;
-  $("acc").textContent = latest.slice(0,3).map(v => v.toFixed(2)).join("  ");
-  $("gyr").textContent = latest.slice(3).map(v => v.toFixed(0)).join("  ");
+  $("acc").textContent = latest.slice(0,3).map(function (v) { return v.toFixed(2); }).join("  ");
+  $("gyr").textContent = latest.slice(3).map(function (v) { return v.toFixed(0); }).join("  ");
   if (batch.length >= BATCH) {
     if (client && client.connected) {
+      lastPublish = Date.now();
       client.publish($("prefix").value + "/imu", batch.join(";"));
       $("sent").textContent = ++sent;
     }
@@ -93,10 +173,10 @@ function tick() {
   }
 }
 
-setInterval(() => { $("rate").textContent = ticks + " Hz"; ticks = 0; }, 1000);
+setInterval(function () { $("rate").textContent = ticks + " Hz"; ticks = 0; }, 1000);
 
+// ---------- connection ----------
 async function start() {
-  // iOS needs explicit permission, requested from a user gesture
   if (typeof DeviceMotionEvent !== "undefined" &&
       typeof DeviceMotionEvent.requestPermission === "function") {
     const res = await DeviceMotionEvent.requestPermission();
@@ -107,22 +187,27 @@ async function start() {
   client = mqtt.connect("wss://broker.hivemq.com:8884/mqtt",
                         { clientId: "phone-" + Math.random().toString(16).slice(2) });
 
-  client.on("connect", () => {
+  client.on("connect", function () {
     $("st").textContent = "connected";
     client.subscribe($("prefix").value + "/alert");
   });
-  client.on("error", () => { $("st").textContent = "error"; });
-  client.on("close",  () => { $("st").textContent = "closed"; });
+  client.on("error", function () { $("st").textContent = "error"; });
+  client.on("close",  function () { $("st").textContent = "closed"; });
 
-  client.on("message", (topic, msg) => {
+  client.on("message", function (topic, msg) {
     try {
       const d = JSON.parse(msg.toString());
+      const rt = lastPublish ? Date.now() - lastPublish : 0;
       const el = $("alert");
       el.textContent = d.fall ? "FALL DETECTED" : "normal";
       el.className = d.fall ? "bad" : "ok";
       $("p").textContent  = Number(d.p).toFixed(3);
       $("ms").textContent = Number(d.ms).toFixed(2) + " ms";
-      if (d.fall && navigator.vibrate) navigator.vibrate([200,100,200,100,200]);
+      $("rt").textContent = rt + " ms";
+      if (d.fall) {
+        logFall(Number(d.p), Number(d.ms), rt);
+        if (navigator.vibrate) navigator.vibrate([200,100,200,100,200]);
+      }
     } catch (err) { /* ignore malformed */ }
   });
 
@@ -142,7 +227,9 @@ function stop() {
   $("go").className = "";
 }
 
-$("go").addEventListener("click", () => running ? stop() : start());
+$("go").addEventListener("click", function () { running ? stop() : start(); });
+
+load(); render();
 </script>
 </body>
 </html>
