@@ -59,7 +59,8 @@
 <div class="card">
   <label>Topic prefix (must match the sketch)</label>
   <input id="prefix" value="fibils/nahin/8827">
-  <button id="go">Start streaming</button>
+  <button id="go">Start streaming (PHONE mode)</button>
+  <button id="watch" class="small">Only watch alerts (LIVE mode)</button>
 </div>
 
 <div class="card">
@@ -75,10 +76,12 @@
 
 <div class="card">
   <div id="alert" class="ok">waiting</div>
-  <p class="note" style="text-align:center;margin:0 0 6px">The ESP32 only sends a message when it detects a fall</p>
+  <div class="row"><span>ESP32 mode</span><span id="md">-</span></div>
+  <div class="row"><span>ESP32 sees |a|</span><span id="la">-</span></div>
+  <div class="row"><span>ESP32 sees |w|</span><span id="lw">-</span></div>
   <div class="row"><span>impact</span><span id="p">-</span></div>
   <div class="row"><span>rotation</span><span id="ms">-</span></div>
-  <div class="row"><span>round trip</span><span id="rt">-</span></div>
+  <div class="row"><span>last message from ESP32</span><span id="rt">-</span></div>
 </div>
 
 <div class="card">
@@ -107,6 +110,7 @@ let client = null, running = false, timer = null;
 let latest = [0,0,1,0,0,0], batch = [], sent = 0, ticks = 0;
 let lastPublish = 0, lastLogged = 0;
 let events = [];
+let wasFall = false, lastMsg = 0;
 
 const $ = id => document.getElementById(id);
 
@@ -258,16 +262,25 @@ function tick() {
   }
 }
 
-setInterval(function () { $("rate").textContent = ticks + " Hz"; ticks = 0; }, 1000);
+setInterval(function () {
+  $("rate").textContent = ticks + " Hz"; ticks = 0;
+  if (running) $("rt").textContent = lastMsg ? ((Date.now() - lastMsg) / 1000).toFixed(1) + " s ago" : "none yet";
+  if (running && (!lastMsg || Date.now() - lastMsg > 3000)) {
+    $("alert").textContent = "no reply from ESP32"; $("alert").className = "bad";
+  }
+}, 1000);
 
 // ---------- connection ----------
-async function start() {
-  if (typeof DeviceMotionEvent !== "undefined" &&
+let streaming = false;
+
+async function start(stream) {
+  if (stream && typeof DeviceMotionEvent !== "undefined" &&
       typeof DeviceMotionEvent.requestPermission === "function") {
     const res = await DeviceMotionEvent.requestPermission();
     if (res !== "granted") { alert("Motion permission denied"); return; }
   }
-  window.addEventListener("devicemotion", onMotion);
+  if (stream) window.addEventListener("devicemotion", onMotion);
+  streaming = stream;
 
   client = mqtt.connect("wss://broker.hivemq.com:8884/mqtt",
                         { clientId: "phone-" + Math.random().toString(16).slice(2) });
@@ -283,14 +296,19 @@ async function start() {
     try {
       const d = JSON.parse(msg.toString());
       const rt = lastPublish ? Date.now() - lastPublish : 0;
+      lastMsg = Date.now();
       const el = $("alert");
       el.textContent = d.fall ? "FALL DETECTED" : "normal";
       el.className = d.fall ? "bad" : "ok";
+      if (d.mode) $("md").textContent = d.mode === "LIVE" ? "LIVE, Wokwi sensor" : "PHONE, this phone";
+      if (d.a !== undefined) $("la").textContent = Number(d.a).toFixed(2) + " g";
+      if (d.w !== undefined) $("lw").textContent = Number(d.w).toFixed(0) + " deg/s";
       $("p").textContent  = Number(d.impact || 0).toFixed(2) + " g";
       $("ms").textContent = Number(d.rot || 0).toFixed(0) + " deg/s";
-      $("rt").textContent = rt + " ms";
 
-      if (d.fall) {
+      const isNew = d.fall && !wasFall;
+      wasFall = !!d.fall;
+      if (isNew) {
         logFall({
           t: Date.now(), p: 0, ms: 0, rt: rt,
           minA: 0, maxA: Number(d.impact || 0),
@@ -302,10 +320,11 @@ async function start() {
     } catch (err) { console.error("alert handler failed", err, msg.toString()); }
   });
 
-  timer = setInterval(tick, PERIOD);
+  if (stream) timer = setInterval(tick, PERIOD);
   running = true;
-  $("go").textContent = "Stop";
-  $("go").className = "stop";
+  const btn = stream ? $("go") : $("watch");
+  btn.textContent = "Stop"; btn.className = "stop";
+  (stream ? $("watch") : $("go")).style.display = "none";
 }
 
 function stop() {
@@ -314,11 +333,13 @@ function stop() {
   if (client) client.end();
   running = false;
   $("st").textContent = "not connected";
-  $("go").textContent = "Start streaming";
-  $("go").className = "";
+  $("go").textContent = "Start streaming (PHONE mode)"; $("go").className = "";
+  $("watch").textContent = "Only watch alerts (LIVE mode)"; $("watch").className = "small";
+  $("go").style.display = ""; $("watch").style.display = "";
 }
 
-$("go").addEventListener("click", function () { running ? stop() : start(); });
+$("go").addEventListener("click", function () { running ? stop() : start(true); });
+$("watch").addEventListener("click", function () { running ? stop() : start(false); });
 
 load(); render();
 </script>
