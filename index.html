@@ -58,7 +58,7 @@
 
 <div class="card">
   <label>Topic prefix (must match the sketch)</label>
-  <input id="prefix" value="fibils/nahin">
+  <input id="prefix" value="fibils/nahin/8827">
   <button id="go">Start streaming</button>
 </div>
 
@@ -75,17 +75,14 @@
 
 <div class="card">
   <div id="alert" class="ok">waiting</div>
-  <div class="row"><span>probability</span><span id="p">-</span></div>
-  <div class="row"><span>inference</span><span id="ms">-</span></div>
+  <p class="note" style="text-align:center;margin:0 0 6px">The ESP32 only sends a message when it detects a fall</p>
+  <div class="row"><span>impact</span><span id="p">-</span></div>
+  <div class="row"><span>rotation</span><span id="ms">-</span></div>
   <div class="row"><span>round trip</span><span id="rt">-</span></div>
 </div>
 
 <div class="card">
-  <h2>Last detection, what the model saw</h2>
-  <div id="last"><p class="note">Nothing yet. The waveform appears when a fall is detected.</p></div>
-</div>
 
-<div class="card">
   <h2>Fall history</h2>
   <div id="log"><p class="note">No falls recorded.</p></div>
   <div class="btn-row">
@@ -192,16 +189,13 @@ function render() {
         '<span class="ev-time">' + d.toLocaleTimeString() + '</span>' +
         '<span class="ev-date">' + d.toLocaleDateString() + '</span></div>' +
       '<div class="ev-meta">' +
-        'probability ' + e.p.toFixed(3) + '<br>' +
-        'lowest ' + e.minA.toFixed(2) + ' g at ' + e.tMin.toFixed(2) + ' s, ' +
-        'peak ' + e.maxA.toFixed(2) + ' g at ' + e.tMax.toFixed(2) + ' s<br>' +
-        'rotation ' + e.maxG.toFixed(0) + ' deg/s, inference ' + e.ms.toFixed(2) + ' ms, ' +
+        'impact ' + e.maxA.toFixed(2) + ' g, rotation ' + e.maxG.toFixed(0) + ' deg/s<br>' +
         'round trip ' + e.rt + ' ms' +
       '</div>';
 
     if (!e.w || !e.w.length) {
       return '<div class="ev">' + head +
-             '<p class="note" style="margin:6px 0 0">Waveform not kept for this entry.</p></div>';
+             '</div>';
     }
     return '<details class="ev"' + (i === 0 ? ' open' : '') + '>' +
              '<summary>' + head + '<span class="tap">tap for the waveform</span></summary>' +
@@ -217,24 +211,19 @@ function logFall(e) {
   lastLogged = now;
   events.unshift(e);
   save(); render();
-  $("last").innerHTML = detailHtml(e);
 }
 
 $("clear").addEventListener("click", function () {
   if (!confirm("Delete all recorded falls?")) return;
   events = []; save(); render();
-  $("last").innerHTML = '<p class="note">Nothing yet. The waveform appears when a fall is detected.</p>';
 });
 
 $("csv").addEventListener("click", function () {
-  const head = ["iso_time","local_time","probability","inference_ms","round_trip_ms",
-                "min_g","t_min_s","max_g","t_max_s","peak_dps"];
+  const head = ["iso_time","local_time","round_trip_ms","impact_g","peak_dps"];
   const rows = [head].concat(events.map(function (e) {
     const d = new Date(e.t);
     return [d.toISOString(), d.toLocaleString().replace(/,/g, " "),
-            e.p.toFixed(4), e.ms.toFixed(3), e.rt,
-            e.minA.toFixed(2), e.tMin.toFixed(2),
-            e.maxA.toFixed(2), e.tMax.toFixed(2), e.maxG.toFixed(0)];
+            e.rt, e.maxA.toFixed(2), e.maxG.toFixed(0)];
   }));
   const blob = new Blob([rows.map(function (r) { return r.join(","); }).join("\n")],
                         { type: "text/csv" });
@@ -297,16 +286,16 @@ async function start() {
       const el = $("alert");
       el.textContent = d.fall ? "FALL DETECTED" : "normal";
       el.className = d.fall ? "bad" : "ok";
-      $("p").textContent  = Number(d.p).toFixed(3);
-      $("ms").textContent = Number(d.ms).toFixed(2) + " ms";
+      $("p").textContent  = Number(d.impact || 0).toFixed(2) + " g";
+      $("ms").textContent = Number(d.rot || 0).toFixed(0) + " deg/s";
       $("rt").textContent = rt + " ms";
 
       if (d.fall) {
         logFall({
-          t: Date.now(), p: Number(d.p), ms: Number(d.ms), rt: rt,
-          minA: Number(d.minA || 0), maxA: Number(d.maxA || 0),
-          tMin: Number(d.tMin || 0), tMax: Number(d.tMax || 0),
-          maxG: Number(d.maxG || 0), w: d.w || []
+          t: Date.now(), p: 0, ms: 0, rt: rt,
+          minA: 0, maxA: Number(d.impact || 0),
+          tMin: 0, tMax: 0,
+          maxG: Number(d.rot || 0), w: []
         });
         if (navigator.vibrate) navigator.vibrate([200,100,200,100,200]);
       }
@@ -332,7 +321,6 @@ function stop() {
 $("go").addEventListener("click", function () { running ? stop() : start(); });
 
 load(); render();
-if (events.length && events[0].w) $("last").innerHTML = detailHtml(events[0]);
 </script>
 </body>
 </html>
